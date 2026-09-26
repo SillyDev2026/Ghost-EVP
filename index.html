@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#070b12" />
-  <title>EVP Field Lab v2</title>
+  <title>EVP Field Lab v3</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -12,8 +12,8 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">ADAPTIVE AUDIO ANOMALY INVESTIGATOR</p>
-        <h1>EVP Field Lab <span>v2</span></h1>
-        <p class="subtitle">Continuous room learning, adaptive thresholds, speech separation, transient analysis, recording and evidence review.</p>
+        <h1>EVP Field Lab <span>v3</span></h1>
+        <p class="subtitle">Adaptive room learning plus question/response listening windows that capture and score only real microphone audio—no generated voices or random word banks.</p>
       </div>
       <div id="statusPill" class="status-pill idle"><span></span><strong>IDLE</strong></div>
     </header>
@@ -22,6 +22,7 @@
       <button id="startBtn" class="primary">Start Session</button>
       <button id="stopBtn" disabled>Stop</button>
       <button id="markTalkBtn" disabled>I'm Talking</button>
+      <button id="responseListenBtn" disabled class="listen-btn">Ask / Listen for Reply</button>
       <button id="markEventBtn" disabled>Mark Event</button>
       <button id="downloadAudioBtn" disabled>Download Audio</button>
       <button id="exportBtn" disabled>Export Evidence</button>
@@ -57,6 +58,11 @@
         <span class="metric-label">Noise Stability</span>
         <strong id="stabilityValue">—</strong>
         <small id="stabilityDetail">Measures how much the room is changing.</small>
+      </article>
+      <article class="panel metric-card response-card">
+        <span class="metric-label">Reply Listening</span>
+        <strong id="responseWindowStatus">Idle</strong>
+        <small id="responseWindowDetail">Ask a question normally; the reply window can start automatically when you stop talking.</small>
       </article>
     </section>
 
@@ -109,6 +115,20 @@
           <input id="speechGuard" type="checkbox" checked />
           Suppress likely near-field speech from EVP candidates
         </label>
+        <label class="checkbox-row strong-row">
+          <input id="autoResponse" type="checkbox" checked />
+          <span><strong>Auto listen after I speak</strong><small>Starts a reply-only listening window after near-field speech ends.</small></span>
+        </label>
+        <label>
+          Reply window
+          <input id="responseDuration" type="range" min="5" max="20" value="10" />
+          <span id="responseDurationValue">10s</span>
+        </label>
+        <label>
+          Reply sensitivity
+          <input id="responseSensitivity" type="range" min="70" max="160" value="115" />
+          <span id="responseSensitivityValue">115%</span>
+        </label>
         <label class="checkbox-row">
           <input id="autoRecord" type="checkbox" checked />
           Record full session audio locally in this browser
@@ -125,7 +145,16 @@
         <div><span>Peak factor</span><strong id="peakFactorValue">0.00×</strong></div>
         <div><span>Baseline updates</span><strong id="baselineUpdatesValue">0</strong></div>
         <div><span>Environment drift</span><strong id="driftValue">0.0 dB</strong></div>
+        <div><span>Reply score</span><strong id="replyScoreValue">0%</strong></div>
+        <div><span>Voice persistence</span><strong id="replyPersistenceValue">0 ms</strong></div>
       </div>
+    </section>
+
+    <section class="panel response-clips-card">
+      <div class="section-title">
+        <div><h2>Captured Reply Windows</h2><p>These players contain only microphone audio captured after a question. Nothing is synthesized.</p></div>
+      </div>
+      <div id="responseClips" class="response-clips"><div class="empty-state">No reply windows captured yet.</div></div>
     </section>
 
     <section class="panel events-card">
@@ -140,7 +169,7 @@
     </section>
 
     <footer>
-      <p>EVP Field Lab analyzes microphone signals and environmental audio patterns. It cannot scientifically determine that a ghost or paranormal entity caused an event.</p>
+      <p>EVP Field Lab records and analyzes microphone signals. It never generates a reply. A flagged or transcribed sound may still have an ordinary source and cannot by itself establish a paranormal cause.</p>
     </footer>
   </main>
 
