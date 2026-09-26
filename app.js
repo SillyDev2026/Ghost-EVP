@@ -2,7 +2,7 @@
 
 const $ = id => document.getElementById(id);
 const ui = {
-  startBtn: $('startBtn'), stopBtn: $('stopBtn'), markTalkBtn: $('markTalkBtn'), markEventBtn: $('markEventBtn'),
+  startBtn: $('startBtn'), stopBtn: $('stopBtn'), markTalkBtn: $('markTalkBtn'), responseListenBtn: $('responseListenBtn'), markEventBtn: $('markEventBtn'),
   downloadAudioBtn: $('downloadAudioBtn'), exportBtn: $('exportBtn'), clearBtn: $('clearBtn'), statusPill: $('statusPill'),
   dbValue: $('dbValue'), levelBar: $('levelBar'), scoreValue: $('scoreValue'), scoreBar: $('scoreBar'),
   adaptiveThresholdValue: $('adaptiveThresholdValue'), thresholdDetail: $('thresholdDetail'), baselineValue: $('baselineValue'),
@@ -13,7 +13,11 @@ const ui = {
   speechGuard: $('speechGuard'), autoRecord: $('autoRecord'), autoAdjust: $('autoAdjust'), engineMode: $('engineMode'),
   events: $('events'), waveCanvas: $('waveCanvas'), spectrumCanvas: $('spectrumCanvas'), spectrogramCanvas: $('spectrogramCanvas'),
   speechRatioValue: $('speechRatioValue'), centroidValue: $('centroidValue'), flatnessValue: $('flatnessValue'),
-  peakFactorValue: $('peakFactorValue'), baselineUpdatesValue: $('baselineUpdatesValue'), driftValue: $('driftValue')
+  peakFactorValue: $('peakFactorValue'), baselineUpdatesValue: $('baselineUpdatesValue'), driftValue: $('driftValue'),
+  autoResponse: $('autoResponse'), responseDuration: $('responseDuration'), responseDurationValue: $('responseDurationValue'),
+  responseSensitivity: $('responseSensitivity'), responseSensitivityValue: $('responseSensitivityValue'),
+  responseWindowStatus: $('responseWindowStatus'), responseWindowDetail: $('responseWindowDetail'), replyScoreValue: $('replyScoreValue'),
+  replyPersistenceValue: $('replyPersistenceValue'), responseClips: $('responseClips')
 };
 
 const state = {
@@ -24,7 +28,11 @@ const state = {
   currentAdaptiveThreshold: 68, lastEventAt: 0, eventCooldownMs: 1800, events: [], userTalkingUntil: 0,
   likelySpeech: false, mediaRecorder: null, chunks: [], audioBlob: null, recognition: null, recognitionWanted: false,
   lastMetrics: null, lastScore: 0, scoreHistory: [], dbHistory: [], previousRms: 0, previousCentroid: 0,
-  spectrogramX: 0, alertTimer: null, lastBaselineUiAt: 0, startupFinishedEvent: false
+  spectrogramX: 0, alertTimer: null, lastBaselineUiAt: 0, startupFinishedEvent: false,
+  speechHoldUntil: 0, speechActiveSince: 0, lastSpeechDurationMs: 0, pendingAutoResponseAt: 0,
+  responseWindowStart: 0, responseWindowUntil: 0, responseGraceMs: 650, responseTranscriptGraceMs: 1800,
+  responseCandidateFrames: 0, responseCandidatePeak: 0, responseLastEventAt: 0, responseScore: 0,
+  responseRecorder: null, responseChunks: [], responseClips: [], responseClipCounter: 0
 };
 
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
@@ -161,12 +169,174 @@ function startupCalibration(m) {
 }
 
 function detectSpeech(m) {
-  const manual = performance.now() < state.userTalkingUntil;
+  const now = performance.now();
+  const manual = now < state.userTalkingUntil;
   const above = m.db - state.baselineDb;
-  const nearSpeechShape = m.speechRatio > 0.43 && m.peakFactor < 12 && above > 4;
-  const strongSpeechShape = m.speechRatio > 0.55 && above > 1.5;
-  state.likelySpeech = manual || nearSpeechShape || strongSpeechShape;
+  // Near-field speech guard: deliberately stricter than the reply detector so faint distant speech-like audio
+  // can still be examined during a reply window.
+  const nearSpeechShape = m.speechRatio > 0.43 && m.peakFactor < 12 && above > 7;
+  const strongSpeechShape = m.speechRatio > 0.57 && m.flatness < 0.62 && above > 4.5;
+  const rawNearSpeech = manual || nearSpeechShape || strongSpeechShape;
+  const wasSpeech = state.likelySpeech;
+
+  if (rawNearSpeech) state.speechHoldUntil = now + 420;
+  state.likelySpeech = manual || rawNearSpeech || now < state.speechHoldUntil;
+
+  if (!wasSpeech && state.likelySpeech) {
+    state.speechActiveSince = now;
+    state.pendingAutoResponseAt = 0;
+  } else if (wasSpeech && !state.likelySpeech) {
+    state.lastSpeechDurationMs = Math.max(0, now - state.speechActiveSince);
+    if (state.lastSpeechDurationMs >= 550 && ui.autoResponse.checked) state.pendingAutoResponseAt = now + 700;
+  }
   return state.likelySpeech;
+}
+
+function responseWindowActive() {
+  return !!state.stream && performance.now() < state.responseWindowUntil;
+}
+
+function responseMimeType() {
+  if (!window.MediaRecorder) return '';
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+  return candidates.find(t => MediaRecorder.isTypeSupported?.(t)) || '';
+}
+
+function startResponseClipCapture() {
+  if (!state.stream || !window.MediaRecorder || state.responseRecorder) return;
+  try {
+    const mimeType = responseMimeType();
+    const rec = mimeType ? new MediaRecorder(state.stream, { mimeType }) : new MediaRecorder(state.stream);
+    state.responseChunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) state.responseChunks.push(e.data); };
+    rec.onstop = () => {
+      if (!state.responseChunks.length) { state.responseRecorder = null; return; }
+      const blob = new Blob(state.responseChunks, { type: rec.mimeType || 'audio/webm' });
+      const url = URL.createObjectURL(blob);
+      const clip = {
+        id: ++state.responseClipCounter, url, blob, createdAt: new Date().toISOString(),
+        sessionTime: Math.max(0, (state.responseWindowStart - state.sessionStart) / 1000),
+        duration: Number(ui.responseDuration.value), peakScore: Math.round(state.responseCandidatePeak)
+      };
+      state.responseClips.unshift(clip);
+      state.responseRecorder = null;
+      state.responseChunks = [];
+      renderResponseClips();
+    };
+    state.responseRecorder = rec;
+    rec.start(250);
+  } catch (err) {
+    console.warn('Reply-window recording unavailable:', err);
+    state.responseRecorder = null;
+  }
+}
+
+function stopResponseClipCapture() {
+  if (state.responseRecorder && state.responseRecorder.state !== 'inactive') {
+    try { state.responseRecorder.stop(); } catch (_) {}
+  }
+}
+
+function renderResponseClips() {
+  if (!state.responseClips.length) {
+    ui.responseClips.innerHTML = '<div class="empty-state">No reply windows captured yet.</div>';
+    return;
+  }
+  ui.responseClips.innerHTML = state.responseClips.map(c => `
+    <div class="response-clip">
+      <div class="clip-meta"><strong>Reply window ${c.id}</strong><br>${formatTime(c.sessionTime)} • peak reply score ${c.peakScore}%<br>Raw microphone capture</div>
+      <audio controls preload="metadata" src="${c.url}"></audio>
+    </div>`).join('');
+}
+
+function startResponseWindow(source = 'manual') {
+  if (!state.stream || !state.calibrated) return;
+  const now = performance.now();
+  const durationMs = Number(ui.responseDuration.value) * 1000;
+  if (responseWindowActive()) {
+    state.responseWindowUntil = Math.max(state.responseWindowUntil, now + durationMs);
+    return;
+  }
+  state.responseWindowStart = now;
+  state.responseWindowUntil = now + durationMs;
+  state.responseCandidateFrames = 0;
+  state.responseCandidatePeak = 0;
+  state.responseScore = 0;
+  state.pendingAutoResponseAt = 0;
+  startResponseClipCapture();
+  addEvent('Reply window', 0, `${source === 'auto' ? 'Automatically' : 'Manually'} listening for ${Number(ui.responseDuration.value)} seconds after investigator speech.`, false);
+}
+
+function finishResponseWindow() {
+  if (!state.responseWindowUntil) return;
+  state.responseWindowUntil = 0;
+  state.responseCandidateFrames = 0;
+  stopResponseClipCapture();
+  if (state.stream) setStatus('LIVE', 'live');
+}
+
+function computeResponseScore(m) {
+  if (!responseWindowActive()) return 0;
+  const now = performance.now();
+  if (now - state.responseWindowStart < state.responseGraceMs || state.likelySpeech) return 0;
+  const dbRise = m.db - state.baselineDb;
+  const level = clamp((dbRise - 0.5) / 12, 0, 1);
+  const speechShape = clamp((m.speechRatio - 0.27) / 0.38, 0, 1);
+  const tonal = clamp((0.72 - m.flatness) / 0.48, 0, 1);
+  const usefulPeak = clamp((m.peakFactor - 1.8) / 5.5, 0, 1) * clamp((11 - m.peakFactor) / 6, 0, 1);
+  const spectralMovement = clamp(Math.abs(m.centroid - state.baselineCentroid) / Math.max(state.baselineCentroid, 450), 0, 1);
+  const statistical = clamp(((m.db - state.noiseMeanDb) / Math.max(state.noiseStdDb, 0.8) - 0.5) / 3.5, 0, 1);
+  const broadbandPenalty = clamp((m.flatness - 0.62) / 0.30, 0, 0.55);
+  let score = (level * 0.22 + speechShape * 0.31 + tonal * 0.18 + usefulPeak * 0.08 + spectralMovement * 0.08 + statistical * 0.13) * 100;
+  score *= Number(ui.responseSensitivity.value) / 100;
+  score *= 1 - broadbandPenalty;
+  return clamp(score, 0, 100);
+}
+
+function responseTriggerThreshold() {
+  const sensitivity = Number(ui.responseSensitivity.value);
+  return clamp(62 - (sensitivity - 100) * 0.16 + Math.max(0, state.noiseStdDb - 1.5) * 1.5, 46, 78);
+}
+
+function serviceResponseMode(m) {
+  const now = performance.now();
+  if (state.pendingAutoResponseAt && now >= state.pendingAutoResponseAt && !state.likelySpeech) {
+    state.pendingAutoResponseAt = 0;
+    startResponseWindow('auto');
+  }
+  if (state.responseWindowUntil && now >= state.responseWindowUntil) finishResponseWindow();
+
+  const active = responseWindowActive();
+  if (!active) {
+    state.responseScore = 0;
+    ui.responseWindowStatus.textContent = 'Idle';
+    ui.responseWindowDetail.textContent = ui.autoResponse.checked ? 'Ready • a reply window starts after you finish speaking.' : 'Press Ask / Listen for Reply to open a listening window.';
+    ui.replyScoreValue.textContent = '0%';
+    ui.replyPersistenceValue.textContent = '0 ms';
+    return;
+  }
+
+  const remaining = Math.max(0, (state.responseWindowUntil - now) / 1000);
+  state.responseScore = computeResponseScore(m);
+  state.responseCandidatePeak = Math.max(state.responseCandidatePeak, state.responseScore);
+  const threshold = responseTriggerThreshold();
+  const voiceLike = m.speechRatio > 0.30 && m.flatness < 0.63 && m.db > state.baselineDb + 0.8;
+  if (state.responseScore >= threshold && voiceLike && !state.likelySpeech) state.responseCandidateFrames++;
+  else state.responseCandidateFrames = Math.max(0, state.responseCandidateFrames - 2);
+
+  const persistenceMs = Math.round(state.responseCandidateFrames * (1000 / 60));
+  ui.responseWindowStatus.textContent = `${remaining.toFixed(1)}s`;
+  ui.responseWindowDetail.textContent = `Listening for captured reply-like audio • trigger ${Math.round(threshold)}%`;
+  ui.replyScoreValue.textContent = `${Math.round(state.responseScore)}%`;
+  ui.replyPersistenceValue.textContent = `${persistenceMs} ms`;
+  setStatus('LISTENING', 'listening');
+
+  if (state.responseCandidateFrames >= 12 && now - state.responseLastEventAt > 2200) {
+    state.responseLastEventAt = now;
+    state.responseCandidateFrames = 0;
+    const detail = `${m.db.toFixed(1)} dB • reply score ${Math.round(state.responseScore)}% • speech-band ${Math.round(m.speechRatio * 100)}% • flatness ${m.flatness.toFixed(2)} • raw audio captured`;
+    addEvent('Possible reply audio', state.responseScore, detail, true);
+  }
 }
 
 function calculateRawScore(m) {
@@ -205,7 +375,7 @@ function computeAdaptiveThreshold() {
 }
 
 function isSafeAmbientFrame(m, score) {
-  if (!state.calibrated || !ui.autoAdjust.checked) return false;
+  if (!state.calibrated || !ui.autoAdjust.checked || responseWindowActive()) return false;
   const threshold = computeAdaptiveThreshold();
   const manualTalking = performance.now() < state.userTalkingUntil;
   if (manualTalking || state.likelySpeech) return false;
@@ -259,7 +429,8 @@ function updateStabilityUi() {
 function classify(m, score, threshold) {
   if (!state.calibrated) return ['Learning room', 'Fast startup calibration is building an initial baseline.'];
   if (performance.now() < state.userTalkingUntil) return ['User speech', 'Manual speech marker is active.'];
-  if (state.likelySpeech) return ['Likely speech', 'Speech-band shape suggests nearby human speech.'];
+  if (responseWindowActive() && state.responseScore >= responseTriggerThreshold() && !state.likelySpeech) return ['Reply-like audio', 'Voice-like microphone structure is present inside the post-question listening window.'];
+  if (state.likelySpeech) return ['Likely near-field speech', 'Speech-band shape and level suggest the investigator or another nearby speaker.'];
   if (score >= threshold) return ['Audio anomaly', 'Signal differs strongly from the adaptive room model.'];
   if (m.db > state.baselineDb + Math.max(5, state.noiseStdDb * 2.2)) return ['Sound activity', 'Audio is elevated but below the anomaly trigger.'];
   return ['Ambient', ui.autoAdjust.checked ? 'Normal frames are being used to refine the room model.' : 'Signal is within the locked baseline range.'];
@@ -287,7 +458,7 @@ function renderEvents() {
     return;
   }
   ui.events.innerHTML = state.events.map(e => `
-    <div class="event-row ${e.type === 'Audio anomaly' ? 'alert' : ''}">
+    <div class="event-row ${e.type === 'Audio anomaly' || e.type === 'Possible reply audio' ? 'alert' : ''}">
       <span>${formatTime(e.sessionTime)}</span>
       <span class="tag">${escapeHtml(e.type)}</span>
       <span class="score">${e.score ? `${e.score}%` : '—'}</span>
@@ -300,7 +471,7 @@ function escapeHtml(value) {
 }
 
 function maybeTrigger(m, score, threshold) {
-  if (!state.calibrated) return;
+  if (!state.calibrated || responseWindowActive()) return;
   const now = performance.now();
   if (score < threshold || now - state.lastEventAt < state.eventCooldownMs) return;
   state.lastEventAt = now;
@@ -419,6 +590,7 @@ function renderLoop() {
   state.scoreHistory.push(score); if (state.scoreHistory.length > 600) state.scoreHistory.shift();
   state.dbHistory.push(m.db); if (state.dbHistory.length > 600) state.dbHistory.shift();
   if (state.calibrated) adaptEnvironment(m, score);
+  serviceResponseMode(m);
   const [label, detail] = classify(m, score, threshold);
   ui.classification.textContent = label;
   ui.classDetail.textContent = detail;
@@ -466,14 +638,31 @@ function setupSpeechRecognition() {
     let interim = '';
     const finals = [];
     for (let i = event.resultIndex; i < event.results.length; i++) {
-      const text = event.results[i][0].transcript.trim();
-      if (event.results[i].isFinal) finals.push(text); else interim += `${text} `;
+      const alt = event.results[i][0];
+      const text = alt.transcript.trim();
+      if (event.results[i].isFinal) finals.push({ text, confidence: Number(alt.confidence || 0) });
+      else interim += `${text} `;
     }
     if (finals.length) {
-      state.userTalkingUntil = Math.max(state.userTalkingUntil, performance.now() + 900);
+      const now = performance.now();
       const stamp = formatTime(nowSessionSeconds());
-      ui.transcript.textContent = `[${stamp}] ${finals.join(' ')}\n${ui.transcript.textContent}`.slice(0, 12000);
-      addEvent('Speech', 0, finals.join(' ').slice(0, 200), false);
+      const finalText = finals.map(x => x.text).join(' ').trim();
+      const confidence = Math.max(...finals.map(x => x.confidence));
+      const inReplyWindow = responseWindowActive() && now - state.responseWindowStart >= state.responseTranscriptGraceMs;
+      if (inReplyWindow) {
+        const detectorAgrees = state.responseScore >= responseTriggerThreshold();
+        const confidenceGood = confidence >= 0.72;
+        if (detectorAgrees && confidenceGood) {
+          ui.transcript.textContent = `[${stamp}] Machine transcript (${Math.round(confidence * 100)}%): ${finalText}\n${ui.transcript.textContent}`.slice(0, 12000);
+          addEvent('Machine transcript', state.responseScore, `Recognition ${Math.round(confidence * 100)}%: “${finalText.slice(0, 160)}” • verify against the raw captured clip.`, false);
+        } else {
+          ui.transcript.textContent = `[${stamp}] Reply-window speech candidate captured; automatic words withheld (recognition ${Math.round(confidence * 100)}%, detector ${Math.round(state.responseScore)}%). Review raw clip.\n${ui.transcript.textContent}`.slice(0, 12000);
+        }
+      } else {
+        ui.transcript.textContent = `[${stamp}] Investigator speech: ${finalText}\n${ui.transcript.textContent}`.slice(0, 12000);
+        state.userTalkingUntil = Math.max(state.userTalkingUntil, now + 700);
+        addEvent('Speech', 0, finalText.slice(0, 200), false);
+      }
     } else if (interim) {
       ui.speechSupport.textContent = `hearing: ${interim.trim().slice(0, 35)}`;
     }
@@ -503,16 +692,21 @@ async function startSession() {
     state.timeData = new Float32Array(state.analyser.fftSize);
     state.freqData = new Float32Array(state.analyser.frequencyBinCount);
 
+    state.responseClips.forEach(c => { try { URL.revokeObjectURL(c.url); } catch (_) {} });
     Object.assign(state, {
       sessionStart: performance.now(), startupStart: performance.now(), startupSamples: [], calibrated: false,
       baselineUpdates: 0, lastEventAt: 0, events: [], scoreHistory: [], dbHistory: [], previousRms: 0,
-      previousCentroid: 0, spectrogramX: 0, startupFinishedEvent: false, currentAdaptiveThreshold: Number(ui.threshold.value)
+      previousCentroid: 0, spectrogramX: 0, startupFinishedEvent: false, currentAdaptiveThreshold: Number(ui.threshold.value),
+      speechHoldUntil: 0, speechActiveSince: 0, lastSpeechDurationMs: 0, pendingAutoResponseAt: 0,
+      responseWindowStart: 0, responseWindowUntil: 0, responseCandidateFrames: 0, responseCandidatePeak: 0,
+      responseLastEventAt: 0, responseScore: 0, responseRecorder: null, responseChunks: [], responseClips: [], responseClipCounter: 0
     });
     renderEvents();
+    renderResponseClips();
     ui.sampleRateLabel.textContent = `${Math.round(state.audioContext.sampleRate / 1000)} kHz • ${state.analyser.fftSize}-point FFT`;
-    ui.startBtn.disabled = true; ui.stopBtn.disabled = false; ui.markTalkBtn.disabled = false; ui.markEventBtn.disabled = false;
+    ui.startBtn.disabled = true; ui.stopBtn.disabled = false; ui.markTalkBtn.disabled = false; ui.responseListenBtn.disabled = false; ui.markEventBtn.disabled = false;
     ui.exportBtn.disabled = true;
-    ui.transcript.textContent = 'Listening… you can talk normally. “I\'m Talking” forces a 5-second speech exclusion marker.';
+    ui.transcript.textContent = 'Listening… ask a question normally. After you stop speaking, Auto Listen opens a reply window and records only what the microphone actually captures.';
     setStatus('LIVE', 'live');
     setupRecorder(state.stream);
     setupSpeechRecognition();
@@ -527,6 +721,7 @@ async function startSession() {
 
 async function stopSession() {
   cancelAnimationFrame(state.raf); state.raf = 0;
+  finishResponseWindow();
   state.recognitionWanted = false;
   if (state.recognition) { try { state.recognition.stop(); } catch (_) {} }
   state.recognition = null;
@@ -535,7 +730,7 @@ async function stopSession() {
   state.stream?.getTracks().forEach(t => t.stop()); state.stream = null;
   if (state.audioContext) { try { await state.audioContext.close(); } catch (_) {} }
   state.audioContext = null; state.analyser = null;
-  ui.startBtn.disabled = false; ui.stopBtn.disabled = true; ui.markTalkBtn.disabled = true; ui.markEventBtn.disabled = true;
+  ui.startBtn.disabled = false; ui.stopBtn.disabled = true; ui.markTalkBtn.disabled = true; ui.responseListenBtn.disabled = true; ui.markEventBtn.disabled = true;
   ui.exportBtn.disabled = state.events.length === 0;
   setStatus('STOPPED', 'idle');
   ui.classification.textContent = 'Session stopped';
@@ -544,6 +739,7 @@ async function stopSession() {
 
 function markTalking() {
   state.userTalkingUntil = performance.now() + 5000;
+  state.pendingAutoResponseAt = 0;
   addEvent('User speech', 0, 'Manual 5-second speech exclusion marker.', false);
   ui.markTalkBtn.textContent = 'Talking marked ✓';
   setTimeout(() => { ui.markTalkBtn.textContent = "I'm Talking"; }, 900);
@@ -561,7 +757,7 @@ function downloadAudio() {
 
 function exportLog() {
   const payload = {
-    app: 'EVP Field Lab', version: '2.0.0', exportedAt: new Date().toISOString(),
+    app: 'EVP Field Lab', version: '3.0.0', exportedAt: new Date().toISOString(),
     note: 'Scores indicate deviation from the learned audio environment, not evidence that a paranormal entity caused the signal.',
     baseline: {
       db: state.baselineDb, rms: state.baselineRms, centroidHz: state.baselineCentroid, flatness: state.baselineFlatness,
@@ -569,7 +765,8 @@ function exportLog() {
     },
     settings: {
       autoAdjust: ui.autoAdjust.checked, baseTrigger: Number(ui.threshold.value), currentAdaptiveThreshold: state.currentAdaptiveThreshold,
-      sensitivityPercent: Number(ui.sensitivity.value), adaptationSpeedPercent: Number(ui.adaptSpeed.value), speechGuard: ui.speechGuard.checked
+      sensitivityPercent: Number(ui.sensitivity.value), adaptationSpeedPercent: Number(ui.adaptSpeed.value), speechGuard: ui.speechGuard.checked, autoResponse: ui.autoResponse.checked,
+      responseDurationSeconds: Number(ui.responseDuration.value), responseSensitivityPercent: Number(ui.responseSensitivity.value)
     },
     events: state.events.slice().reverse()
   };
@@ -585,6 +782,7 @@ function downloadBlob(blob, filename) {
 ui.startBtn.addEventListener('click', startSession);
 ui.stopBtn.addEventListener('click', stopSession);
 ui.markTalkBtn.addEventListener('click', markTalking);
+ui.responseListenBtn.addEventListener('click', () => startResponseWindow('manual'));
 ui.markEventBtn.addEventListener('click', markManualEvent);
 ui.downloadAudioBtn.addEventListener('click', downloadAudio);
 ui.exportBtn.addEventListener('click', exportLog);
@@ -592,7 +790,10 @@ ui.clearBtn.addEventListener('click', () => { state.events = []; renderEvents();
 ui.threshold.addEventListener('input', () => { ui.thresholdValue.textContent = `${ui.threshold.value}%`; });
 ui.sensitivity.addEventListener('input', () => { ui.sensitivityValue.textContent = `${ui.sensitivity.value}%`; });
 ui.adaptSpeed.addEventListener('input', () => { ui.adaptSpeedValue.textContent = `${ui.adaptSpeed.value}%`; });
+ui.responseDuration.addEventListener('input', () => { ui.responseDurationValue.textContent = `${ui.responseDuration.value}s`; });
+ui.responseSensitivity.addEventListener('input', () => { ui.responseSensitivityValue.textContent = `${ui.responseSensitivity.value}%`; });
 ui.autoAdjust.addEventListener('change', () => { ui.engineMode.textContent = ui.autoAdjust.checked ? 'AUTO' : 'MANUAL'; updateBaselineUi(true); });
+ui.autoResponse.addEventListener('change', () => { if (!ui.autoResponse.checked) state.pendingAutoResponseAt = 0; });
 window.addEventListener('beforeunload', () => state.stream?.getTracks().forEach(t => t.stop()));
 
 if (!navigator.mediaDevices?.getUserMedia) {
@@ -601,3 +802,6 @@ if (!navigator.mediaDevices?.getUserMedia) {
   ui.classDetail.textContent = 'This browser does not expose microphone capture to web pages.';
 }
 ui.speechSupport.textContent = (window.SpeechRecognition || window.webkitSpeechRecognition) ? 'available' : 'not supported';
+ui.responseDurationValue.textContent = `${ui.responseDuration.value}s`;
+ui.responseSensitivityValue.textContent = `${ui.responseSensitivity.value}%`;
+renderResponseClips();
