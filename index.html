@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#070b12" />
+  <title>EVP Field Lab</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">AUDIO ANOMALY INVESTIGATOR</p>
+        <h1>EVP Field Lab</h1>
+        <p class="subtitle">Live microphone analysis, anomaly scoring, speech marking, recording and evidence review.</p>
+      </div>
+      <div id="statusPill" class="status-pill idle"><span></span><strong>IDLE</strong></div>
+    </header>
+
+    <section class="controls panel">
+      <button id="startBtn" class="primary">Start Session</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <button id="markTalkBtn" disabled>I'm Talking</button>
+      <button id="markEventBtn" disabled>Mark Event</button>
+      <button id="downloadAudioBtn" disabled>Download Audio</button>
+      <button id="exportBtn" disabled>Export Log</button>
+    </section>
+
+    <section class="grid metrics-grid">
+      <article class="panel metric-card">
+        <span class="metric-label">Input Level</span>
+        <strong id="dbValue">-∞ dB</strong>
+        <div class="meter"><div id="levelBar"></div></div>
+      </article>
+      <article class="panel metric-card">
+        <span class="metric-label">Anomaly</span>
+        <strong id="scoreValue">0%</strong>
+        <div class="meter"><div id="scoreBar"></div></div>
+      </article>
+      <article class="panel metric-card">
+        <span class="metric-label">State</span>
+        <strong id="classification">Waiting</strong>
+        <small id="classDetail">Start a session to begin.</small>
+      </article>
+      <article class="panel metric-card">
+        <span class="metric-label">Baseline</span>
+        <strong id="baselineValue">Not calibrated</strong>
+        <small id="calibrationText">10 second room calibration at session start.</small>
+      </article>
+    </section>
+
+    <section class="grid visual-grid">
+      <article class="panel chart-card">
+        <div class="section-title"><h2>Waveform</h2><span id="sampleRateLabel">—</span></div>
+        <canvas id="waveCanvas"></canvas>
+      </article>
+      <article class="panel chart-card">
+        <div class="section-title"><h2>Spectrum</h2><span>20 Hz–20 kHz</span></div>
+        <canvas id="spectrumCanvas"></canvas>
+      </article>
+    </section>
+
+    <section class="grid lower-grid">
+      <article class="panel transcript-card">
+        <div class="section-title"><h2>Live Speech Notes</h2><span id="speechSupport">checking…</span></div>
+        <div id="transcript" class="transcript">Speech recognition is optional. Audio analysis works without it.</div>
+      </article>
+
+      <article class="panel settings-card">
+        <div class="section-title"><h2>Detection Settings</h2></div>
+        <label>
+          Trigger threshold
+          <input id="threshold" type="range" min="40" max="95" value="72" />
+          <span id="thresholdValue">72%</span>
+        </label>
+        <label>
+          Sensitivity
+          <input id="sensitivity" type="range" min="50" max="180" value="100" />
+          <span id="sensitivityValue">100%</span>
+        </label>
+        <label class="checkbox-row">
+          <input id="speechGuard" type="checkbox" checked />
+          Suppress likely near-field speech from EVP candidates
+        </label>
+        <label class="checkbox-row">
+          <input id="autoRecord" type="checkbox" checked />
+          Record full session audio locally in this browser
+        </label>
+      </article>
+    </section>
+
+    <section class="panel events-card">
+      <div class="section-title">
+        <div><h2>Evidence Timeline</h2><p>Events are audio anomalies, not proof of paranormal activity.</p></div>
+        <button id="clearBtn">Clear</button>
+      </div>
+      <div class="events-header">
+        <span>Time</span><span>Type</span><span>Score</span><span>Details</span>
+      </div>
+      <div id="events" class="events-list"><div class="empty-state">No events yet.</div></div>
+    </section>
+
+    <footer>
+      <p>EVP Field Lab analyzes microphone signals and environmental audio patterns. It cannot scientifically verify ghosts or paranormal causes.</p>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
