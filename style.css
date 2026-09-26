@@ -71,3 +71,13 @@ footer { color: #657289; font-size: .78rem; line-height: 1.5; text-align: center
   .events-card { overflow-x: auto; } .events-header, .event-row { min-width: 690px; }
   .controls button { flex: 1 1 140px; }
 }
+
+.listen-btn { border-color: rgba(255,209,102,.34); background: rgba(255,209,102,.08); }
+.response-card { border-color: rgba(255,209,102,.18); }
+.status-pill.listening span { background: var(--warn); }
+.response-clips-card { margin-top: 14px; padding: 17px; }
+.response-clips { display: grid; gap: 10px; }
+.response-clip { display: grid; grid-template-columns: 150px 1fr; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(7,11,18,.65); }
+.response-clip .clip-meta { color: var(--muted); font-size: .78rem; line-height: 1.45; }
+.response-clip audio { width: 100%; min-width: 0; }
+@media (max-width: 620px) { .response-clip { grid-template-columns: 1fr; } }
